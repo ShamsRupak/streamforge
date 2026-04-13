@@ -220,3 +220,120 @@ fn test_compress_batch_empty_messages_in_batch() {
 fn test_decompress_batch_bad_data_returns_error() {
     assert!(decompress_batch(b"\xFF\xFF\xFF\xFF").is_err());
 }
+
+// ── ConsumerGroupCoordinator – membership & assignment tests ──────────────────
+
+#[test]
+fn test_register_consumer_appears_in_members() {
+    let mut coord = ConsumerGroupCoordinator::new();
+    coord.register_consumer("g", "consumer-0");
+    coord.register_consumer("g", "consumer-1");
+    let mut members = coord.group_members("g");
+    members.sort();
+    assert_eq!(members, vec!["consumer-0", "consumer-1"]);
+}
+
+#[test]
+fn test_register_consumer_is_idempotent() {
+    let mut coord = ConsumerGroupCoordinator::new();
+    coord.register_consumer("g", "c0");
+    coord.register_consumer("g", "c0"); // duplicate
+    assert_eq!(coord.group_members("g").len(), 1);
+}
+
+#[test]
+fn test_deregister_consumer_removes_member() {
+    let mut coord = ConsumerGroupCoordinator::new();
+    coord.register_consumer("g", "c0");
+    coord.register_consumer("g", "c1");
+    coord.deregister_consumer("g", "c0");
+    assert_eq!(coord.group_members("g"), vec!["c1"]);
+}
+
+#[test]
+fn test_assign_partitions_range_even_split() {
+    // 4 partitions, 2 consumers → [0,1] and [2,3]
+    let mut coord = ConsumerGroupCoordinator::new();
+    coord.register_consumer("g", "c0");
+    coord.register_consumer("g", "c1");
+    let assignment = coord.assign_partitions("g", 4);
+    let mut c0 = assignment["c0"].clone();
+    let mut c1 = assignment["c1"].clone();
+    c0.sort();
+    c1.sort();
+    assert_eq!(c0, vec![0, 1]);
+    assert_eq!(c1, vec![2, 3]);
+}
+
+#[test]
+fn test_assign_partitions_range_uneven_split() {
+    // 7 partitions, 3 consumers → [0,1,2], [3,4], [5,6]
+    let mut coord = ConsumerGroupCoordinator::new();
+    coord.register_consumer("g", "c0");
+    coord.register_consumer("g", "c1");
+    coord.register_consumer("g", "c2");
+    let assignment = coord.assign_partitions("g", 7);
+
+    let mut c0 = assignment["c0"].clone();
+    let mut c1 = assignment["c1"].clone();
+    let mut c2 = assignment["c2"].clone();
+    c0.sort();
+    c1.sort();
+    c2.sort();
+
+    assert_eq!(c0, vec![0, 1, 2]);
+    assert_eq!(c1, vec![3, 4]);
+    assert_eq!(c2, vec![5, 6]);
+}
+
+#[test]
+fn test_assign_partitions_single_consumer_gets_all() {
+    let mut coord = ConsumerGroupCoordinator::new();
+    coord.register_consumer("g", "solo");
+    let assignment = coord.assign_partitions("g", 6);
+    let mut partitions = assignment["solo"].clone();
+    partitions.sort();
+    assert_eq!(partitions, vec![0, 1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn test_assign_partitions_more_consumers_than_partitions() {
+    // 2 partitions, 4 consumers → some consumers get 0 partitions
+    let mut coord = ConsumerGroupCoordinator::new();
+    for i in 0..4 {
+        coord.register_consumer("g", &format!("c{}", i));
+    }
+    let assignment = coord.assign_partitions("g", 2);
+    let total: usize = assignment.values().map(|v| v.len()).sum();
+    assert_eq!(total, 2, "all partitions must be assigned");
+    // The two that have partitions each have exactly 1.
+    let non_empty: Vec<_> = assignment.values().filter(|v| !v.is_empty()).collect();
+    assert_eq!(non_empty.len(), 2);
+    for v in non_empty {
+        assert_eq!(v.len(), 1);
+    }
+}
+
+#[test]
+fn test_assign_partitions_no_members_returns_empty() {
+    let coord = ConsumerGroupCoordinator::new();
+    let assignment = coord.assign_partitions("empty-group", 8);
+    assert!(assignment.is_empty());
+}
+
+#[test]
+fn test_assign_partitions_all_partitions_covered() {
+    // Every partition 0..N must appear exactly once across all assignments.
+    let mut coord = ConsumerGroupCoordinator::new();
+    coord.register_consumer("g", "c0");
+    coord.register_consumer("g", "c1");
+    coord.register_consumer("g", "c2");
+
+    for num_parts in [1u32, 3, 6, 7, 12] {
+        let assignment = coord.assign_partitions("g", num_parts);
+        let mut all: Vec<u32> = assignment.values().flatten().copied().collect();
+        all.sort();
+        let expected: Vec<u32> = (0..num_parts).collect();
+        assert_eq!(all, expected, "failed for num_partitions={}", num_parts);
+    }
+}
